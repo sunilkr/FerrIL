@@ -1,0 +1,12 @@
+[package]
+name = "profile"
+version = "0.2.3"
+description = "Launch target with profiler"
+edition = "2024"
+
+[dependencies]
+bitflags = { workspace = true }
+uuid ={ workspace = true }
+clap = { version = "4.5.43", features = ["derive"] }
+signal-hook = "0.3.18"
+exe = { version = "0.5.7", features = ["winapi"] }
