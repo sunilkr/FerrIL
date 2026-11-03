@@ -1,0 +1,12 @@
+[package]
+name = "load_test"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fern = "0.7.1"
+log.workspace = true
+log_init = { path = "../log_init" }
