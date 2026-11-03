@@ -1,0 +1,16 @@
+[package]
+name = "fntrace"
+version = "0.1.1"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clr_profiler = { path = "../clr_profiler" }
+log_init = { path = "../log_init" }
+config = { path = "../config" }
+uuid = "0.8"
+log = { workspace = true }
+lazy_static = "1.5.0"
+rand = "0.9.2"
