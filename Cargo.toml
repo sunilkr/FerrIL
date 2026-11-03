@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "clr_profiler",
+    "clr_profiler_macros",
+    "profile",  
+    "load_test", 
+    "log_init", 
+    "dotpatch", 
+    "config",
+    "fntrace",
+]
+
+[workspace.dependencies]
+log = "0.4"
+uuid = {version = "0.8", features = ["v4"]}
+bitflags = "2.9.1"
