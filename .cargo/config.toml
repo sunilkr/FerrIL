@@ -1,0 +1,6 @@
+[alias]
+bd32 = "build --target=i686-pc-windows-msvc"
+br32 = "build --release --target=i686-pc-windows-msvc"
+
+#[build]
+#target="i686-pc-windows-msvc"
