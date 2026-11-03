@@ -1,0 +1,46 @@
+{
+    "$schema": "../config.schema.json",
+    "patches": [
+        {
+            "name": "ValidateServerCertificate",
+            "class": "DemoPayload.CertPinning",
+            "new_bytes": ["0x17", "0x2a"]
+        }
+    ],
+    "traces": [
+        {
+            "name": "Encrypt",
+            "class": "DemoPayload.CryptoChannel",
+            "params": [
+                {
+                    "arg_num": 0,
+                    "write_to": "stdout",
+                    "metadata": true
+                }
+            ]
+        },
+        {
+            "name": "Decrypt",
+            "class": "DemoPayload.CryptoChannel",
+            "params": [
+                {
+                    "arg_num": 0,
+                    "write_to": "stdout",
+                    "metadata": true
+                }
+            ],
+            "retval": {}
+        },
+        {
+            "name": "Load",
+            "class": "System.Reflection.Assembly",
+            "params": [
+                {
+                    "arg_num": 0,
+                    "write_to": "file",
+                    "metadata": true
+                }
+            ]
+        }
+    ]
+}
