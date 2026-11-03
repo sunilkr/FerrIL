@@ -1,0 +1,256 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://crowdstrike.com/ferril/config.schema.json",
+    "title": "FerrIL Config",
+    "description": "Configuration for FerrIL CLR profiler modules (dotpatch, fntrace, asmdump, ssl_unpin). Loaded from the path in COR_PROF_CONFIG_FILE (default: config.json) or inline via COR_PROF_CONFIG_DATA.",
+    "type": "object",
+    "properties": {
+        "$schema": {
+            "type": "string",
+            "description": "JSON Schema reference (ignored by the profiler)."
+        },
+        "patches": {
+            "description": "IL patch definitions for dotpatch / ssl_unpin. Each entry matches a method and replaces its IL body (or a portion of it) at JIT time.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/PatchDef" }
+        },
+        "traces": {
+            "description": "Function trace definitions for fntrace / asmdump. Each entry matches a method and captures its arguments and/or return value at call time.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/TraceDef" }
+        }
+    },
+    "additionalProperties": false,
+
+    "$defs": {
+        "HexByte": {
+            "description": "A single byte as a string. Accepts hex with 0x/\\x prefix (e.g. \"0x2a\", \"\\x17\") or decimal (e.g. \"42\"). Case-insensitive.",
+            "type": "string",
+            "pattern": "^(0[xX][0-9a-fA-F]{1,2}|\\\\[xX][0-9a-fA-F]{1,2}|[0-9]{1,3})$",
+            "examples": ["0x17", "0x2a", "\\x0a", "42"]
+        },
+
+        "WildcardByte": {
+            "description": "A byte value or wildcard for pattern matching. In addition to HexByte values: '?' or '??' matches exactly one byte, '*' or '**' matches zero or more bytes.",
+            "type": "string",
+            "pattern": "^(0[xX][0-9a-fA-F]{1,2}|\\\\[xX][0-9a-fA-F]{1,2}|[0-9]{1,3}|\\?{1,2}|\\*{1,2})$",
+            "examples": ["0x0a", "?", "??", "*", "**", "42"]
+        },
+
+        "ByteArray": {
+            "description": "An array of IL bytes. Accepts either a JSON array of hex/decimal strings, or a single space-separated string. Wildcards are NOT allowed.",
+            "oneOf": [
+                {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/HexByte" },
+                    "examples": [["0x17", "0x2a"]]
+                },
+                {
+                    "type": "string",
+                    "description": "Space-separated hex/decimal byte values (e.g. \"0x17 0x2a\").",
+                    "pattern": "^(0[xX][0-9a-fA-F]{1,2}|\\\\[xX][0-9a-fA-F]{1,2}|[0-9]{1,3})(\\s+(0[xX][0-9a-fA-F]{1,2}|\\\\[xX][0-9a-fA-F]{1,2}|[0-9]{1,3}))*$",
+                    "examples": ["0x17 0x2a", "0x2a"]
+                }
+            ]
+        },
+
+        "BytePattern": {
+            "description": "An IL byte pattern with wildcards for matching method bodies. Accepts either a JSON array of hex/wildcard strings, or a single space-separated string. '?' matches one byte, '*' matches any run of bytes.",
+            "oneOf": [
+                {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/WildcardByte" },
+                    "examples": [["0x72", "?", "?", "?", "?", "0x28", "?", "?", "?", "?", "0x16", "0x2a"]]
+                },
+                {
+                    "type": "string",
+                    "description": "Space-separated hex/wildcard byte values.",
+                    "examples": ["0x72 ? ? ? ? 0x28 ? ? ? ? 0x16 0x2a"]
+                }
+            ]
+        },
+
+        "Matcher": {
+            "description": "Function matcher. All specified fields must match (logical AND). At least one of 'name' or 'pattern' is required for validation.",
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Method name to match (e.g. \"userCertValidationCallbackWrapper\", \"Load\"). Exact match."
+                },
+                "class": {
+                    "type": "string",
+                    "description": "Fully qualified class/type name (e.g. \"System.Reflection.Assembly\"). Exact match."
+                },
+                "pattern": {
+                    "$ref": "#/$defs/BytePattern",
+                    "description": "IL byte pattern to match against the method body. Supports '?' (one byte) and '*' (any run) wildcards."
+                }
+            },
+            "anyOf": [
+                { "required": ["name"] },
+                { "required": ["pattern"] }
+            ]
+        },
+
+        "WriteTo": {
+            "description": "Output destination for traced data.",
+            "type": "string",
+            "enum": ["stdout", "file", "STDOUT", "FILE"],
+            "default": "stdout"
+        },
+
+        "OutCfg": {
+            "description": "Output configuration for a traced value (argument or return value).",
+            "type": "object",
+            "properties": {
+                "write_to": {
+                    "$ref": "#/$defs/WriteTo",
+                    "description": "Where to write the captured data. 'stdout' prints to the log/console; 'file' writes to a dump-XXXX.{txt,bin} file.",
+                    "default": "stdout"
+                },
+                "metadata": {
+                    "type": "boolean",
+                    "description": "If true, include metadata (method signature details) in the output.",
+                    "default": false
+                }
+            },
+            "additionalProperties": false
+        },
+
+        "TraceParams": {
+            "description": "Configuration for capturing a single function argument.",
+            "type": "object",
+            "properties": {
+                "arg_num": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255,
+                    "description": "0-based argument index. For instance methods, arg 0 is 'this'; for static methods, arg 0 is the first declared parameter.",
+                    "default": 0
+                },
+                "write_to": {
+                    "$ref": "#/$defs/WriteTo",
+                    "description": "Where to write the captured argument data.",
+                    "default": "stdout"
+                },
+                "metadata": {
+                    "type": "boolean",
+                    "description": "If true, include metadata (method signature details) in the output.",
+                    "default": false
+                }
+            },
+            "additionalProperties": false
+        },
+
+        "PatchDef": {
+            "description": "A single IL patch definition. Combines a Matcher (which method to target) with patch parameters (what to replace). At least 'name' or 'pattern' must be specified.",
+            "type": "object",
+            "allOf": [
+                { "$ref": "#/$defs/Matcher" }
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Method name to match."
+                },
+                "class": {
+                    "type": "string",
+                    "description": "Fully qualified class/type name to match."
+                },
+                "pattern": {
+                    "$ref": "#/$defs/BytePattern",
+                    "description": "IL byte pattern to match against the method body."
+                },
+                "new_bytes": {
+                    "$ref": "#/$defs/ByteArray",
+                    "description": "Replacement IL bytes. Defaults to [0x17, 0x2a] (ldc.i4.1; ret — i.e. 'return true').",
+                    "default": ["0x17", "0x2a"]
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte offset within the original method body at which to start the patch. Default 0 (replace from the beginning).",
+                    "default": 0
+                },
+                "truncate": {
+                    "type": "boolean",
+                    "description": "If true, discard all original bytes after the patch. If false, the remaining original bytes are preserved after new_bytes. Default true.",
+                    "default": true
+                },
+                "copy_header": {
+                    "type": "boolean",
+                    "description": "If true, reuse the original method header (for Fat headers with SEH, locals, etc.). If false, a minimal Tiny header is synthesized. Default false.",
+                    "default": false
+                }
+            },
+            "additionalProperties": false
+        },
+
+        "TraceDef": {
+            "description": "A single function trace definition. Combines a Matcher (which method to target) with parameters specifying which arguments and/or return value to capture. At least 'name' or 'pattern' must be specified, and at least one entry in 'params' is required.",
+            "type": "object",
+            "allOf": [
+                { "$ref": "#/$defs/Matcher" }
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Method name to match."
+                },
+                "class": {
+                    "type": "string",
+                    "description": "Fully qualified class/type name to match."
+                },
+                "pattern": {
+                    "$ref": "#/$defs/BytePattern",
+                    "description": "IL byte pattern to match against the method body."
+                },
+                "params": {
+                    "type": "array",
+                    "description": "List of arguments to capture. At least one is required.",
+                    "items": { "$ref": "#/$defs/TraceParams" },
+                    "minItems": 1,
+                    "default": []
+                },
+                "retval": {
+                    "$ref": "#/$defs/OutCfg",
+                    "description": "If present, capture the method's return value with this output configuration."
+                }
+            },
+            "required": ["params"],
+            "additionalProperties": false
+        }
+    },
+
+    "examples": [
+        {
+            "patches": [
+                {
+                    "name": "userCertValidationCallbackWrapper",
+                    "new_bytes": ["0x17", "0x2a"]
+                }
+            ],
+            "traces": [
+                {
+                    "name": "Load",
+                    "class": "System.Reflection.Assembly",
+                    "params": [
+                        { "arg_num": 0, "write_to": "file" }
+                    ]
+                }
+            ]
+        },
+        {
+            "patches": [
+                {
+                    "pattern": ["0x72", "?", "?", "?", "?", "0x28", "?", "?", "?", "?", "0x16", "0x2a"],
+                    "new_bytes": "0x17",
+                    "offset": 10,
+                    "truncate": false,
+                    "copy_header": true
+                }
+            ]
+        }
+    ]
+}
