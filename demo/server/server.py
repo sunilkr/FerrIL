@@ -7,9 +7,12 @@ A minimal TLS server that pairs with DemoTarget.exe. It:
   3. Reads the length-prefixed encrypted messages sent by CertPinning.cs
   4. Prints the certificate thumbprint so you can update DemoTarget if needed
 
-Protocol (matches CertPinning.cs):
-  Client sends: [4 bytes LE int32 = N] [N bytes = encrypted payload]
-  Server sends: [4 bytes LE int32 = M] [M bytes = response]
+Protocol (matches ServerChannel.cs):
+  Client sends: [4 bytes LE int32 = N] [N bytes = AES-encrypted beacon]
+  Server sends: [4 bytes LE int32 = M] [M bytes = AES-encrypted ACK{beacon}]
+
+  Both the beacon and the ACK are AES-CBC encrypted with the shared demo key.
+  The client verifies the decrypted ACK echoes its beacon (server authentication).
 
 Usage:
   python server.py                     # listen on 0.0.0.0:4443
@@ -140,6 +143,28 @@ def recv_exact(conn, n):
     return buf
 
 
+def encrypt_payload(plaintext_str):
+    """AES-CBC encrypt a string using the demo's hardcoded key/IV."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.padding import PKCS7
+
+        key = b"DemoAesKey!16byt"
+        iv  = b"InitVector!16byt"
+
+        padder = PKCS7(128).padder()
+        padded = padder.update(plaintext_str.encode("utf-8")) + padder.finalize()
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+        encryptor = cipher.encryptor()
+        ciphertext = encryptor.update(padded) + encryptor.finalize()
+        return ciphertext
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
 def decrypt_payload(ciphertext):
     """Attempt to AES-CBC decrypt the payload using the demo's hardcoded key/IV."""
     try:
@@ -203,11 +228,20 @@ def handle_client(conn, addr):
             print("[server] (Could not decrypt — install 'cryptography' for auto-decrypt)")
             ack_msg = "ACK"
 
-        # Send length-prefixed ACK response
-        ack_bytes = ack_msg.encode("utf-8")
-        conn.sendall(struct.pack("<i", len(ack_bytes)))
-        conn.sendall(ack_bytes)
-        print("[server] Sent response: {}".format(ack_msg))
+        # Encrypt the ACK response (mirrors client-side encryption)
+        ack_encrypted = encrypt_payload(ack_msg)
+        if ack_encrypted is not None:
+            conn.sendall(struct.pack("<i", len(ack_encrypted)))
+            conn.sendall(ack_encrypted)
+            print("[server] Sent encrypted ACK: {} bytes ({})".format(
+                len(ack_encrypted), ack_msg))
+        else:
+            # Fallback: send plaintext if encryption unavailable
+            ack_bytes = ack_msg.encode("utf-8")
+            conn.sendall(struct.pack("<i", len(ack_bytes)))
+            conn.sendall(ack_bytes)
+            print("[server] WARNING: Sent plaintext ACK (install 'cryptography'): {}".format(
+                ack_msg))
 
     except ssl.SSLError as e:
         print("[server] SSL error: {}".format(e))

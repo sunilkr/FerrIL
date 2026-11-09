@@ -18,12 +18,15 @@ namespace DemoPayload
     /// Assembly.Load(byte[]). The FerrIL asmdump profiler intercepts that
     /// call and dumps the bytes so analysts can recover this DLL.
     ///
-    /// Once loaded, the loader invokes Stage2.Execute(host, port) by
-    /// reflection. Stage2 then:
-    ///   1. Encrypts a beacon message with AES  (fntrace can capture plaintext)
-    ///   2. Connects to the server over TLS with a pinned certificate
+    /// Once loaded, the loader invokes Stage2.Execute(host, port, noSslVerify)
+    /// by reflection. Stage2 then:
+    ///   1. Connects to the server over TLS with a pinned certificate
     ///      (ssl_unpin bypasses the pin so MITM can inspect the traffic)
+    ///   2. Encrypts a beacon message with AES  (fntrace can capture plaintext)
     ///   3. Sends the encrypted beacon over the pinned channel
+    ///   4. Reads the server's encrypted ACK, decrypts it, and verifies it
+    ///      echoes the beacon (server authentication — proves the server
+    ///      holds the shared key and understood the protocol)
     /// </summary>
     public class Stage2
     {
@@ -40,27 +43,66 @@ namespace DemoPayload
             Console.WriteLine("[Stage2] Target server: {0}:{1}", host, port);
             Console.WriteLine();
 
-            // ── Encrypted communication ──────────────────────────────
+            // ── Step 1: SSL certificate verification ─────────────────
+            Console.WriteLine("[Stage2] === Step 1: SSL Certificate Verification ===");
+            if (noSslVerify)
+                Console.WriteLine("[Stage2] Certificate validation DISABLED (--no-ssl)");
+
+            SslStream ssl;
+            try
+            {
+                ssl = ServerChannel.Connect(host, port, noSslVerify);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Stage2] Connection failed (expected without ssl_unpin): {0}",
+                    ex.GetBaseException().Message);
+                return string.Format("Stage2 failed — could not connect to {0}:{1}", host, port);
+            }
+            Console.WriteLine();
+
+            // ── Step 2: Encrypt and send beacon ──────────────────────
+            Console.WriteLine("[Stage2] === Step 2: Send Encrypted Beacon ===");
+
             string beacon = string.Format("BEACON|{0}|{1}",
                 Guid.NewGuid().ToString("N").Substring(0, 8),
                 DateTime.UtcNow.ToString("o"));
 
-            Console.WriteLine("[Stage2] === Encrypted Communication ===");
-            Console.WriteLine("[Stage2] Plaintext beacon: \"{0}\"", beacon);
-
             byte[] encrypted = CryptoChannel.Encrypt(beacon);
-            Console.WriteLine("[Stage2] Ciphertext (hex): {0}", BitConverter.ToString(encrypted));
+            Console.WriteLine("[Stage2] Encrypted beacon: {0} bytes", encrypted.Length);
 
-            // Verify round-trip
-            string decrypted = CryptoChannel.Decrypt(encrypted);
-            Console.WriteLine("[Stage2] Round-trip check: \"{0}\"", decrypted);
+            try
+            {
+                ServerChannel.SendBeacon(ssl, encrypted);
+            }
+            catch (Exception ex)
+            {
+                ssl.Dispose();
+                Console.WriteLine("[Stage2] Send failed: {0}", ex.GetBaseException().Message);
+                return string.Format("Stage2 failed — send error to {0}:{1}", host, port);
+            }
             Console.WriteLine();
 
-            // ── SSL-pinned connection ─────────────────────────────────
-            Console.WriteLine("[Stage2] === SSL Certificate Pinning ===");
-            if (noSslVerify)
-                Console.WriteLine("[Stage2] Certificate validation DISABLED (--no-ssl)");
-            CertPinning.SendMessage(host, port, encrypted, noSslVerify);
+            // ── Step 3: Verify server response (server authentication) ──
+            Console.WriteLine("[Stage2] === Step 3: Verify Server Response ===");
+
+            try
+            {
+                bool verified = ServerChannel.VerifyServerAck(ssl, beacon);
+                if (verified)
+                    Console.WriteLine("[Stage2] Server authenticated — ACK matches beacon");
+                else
+                    Console.WriteLine("[Stage2] Server authentication FAILED — ACK mismatch");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Stage2] Server verification failed: {0}",
+                    ex.GetBaseException().Message);
+            }
+            finally
+            {
+                ssl.Dispose();
+            }
 
             return string.Format("Stage2 complete — sent {0} encrypted bytes to {1}:{2}",
                 encrypted.Length, host, port);
@@ -68,7 +110,13 @@ namespace DemoPayload
     }
 
     /// <summary>
-    /// SSL certificate pinning via SslStream.
+    /// TLS channel with certificate pinning and server authentication.
+    ///
+    /// Connection lifecycle:
+    ///   1. Connect()         — TCP + TLS handshake with cert pinning
+    ///   2. SendBeacon()      — send length-prefixed encrypted beacon
+    ///   3. VerifyServerAck() — read encrypted ACK, decrypt, verify it
+    ///                          echoes the beacon (server authentication)
     ///
     /// The custom RemoteCertificateValidationCallback checks the server
     /// certificate thumbprint against a pinned value. The FerrIL ssl_unpin
@@ -76,21 +124,27 @@ namespace DemoPayload
     /// "ldc.i4.1; ret" (return true) to bypass this check, enabling MITM
     /// inspection of TLS traffic.
     /// </summary>
-    internal static class CertPinning
+    internal static class ServerChannel
     {
         // Pinned certificate thumbprint (SHA-1).
         // Any server whose cert doesn't match this is rejected — unless
         // ssl_unpin patches the validation wrapper to always return true.
         private const string PinnedThumbprint = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2";
 
+        // Expected ACK wrapper from the server: ACK{<beacon>}
+        private const string AckPrefix = "ACK{";
+        private const char   AckSuffix = '}';
+
+        // ── Step 1: TLS Connect ──────────────────────────────────────
+
         /// <summary>
-        /// Connect to a TLS server with certificate pinning.
+        /// Open a TLS connection to the server with certificate pinning.
         /// When <paramref name="noSslVerify"/> is true, all certificates are accepted.
         /// </summary>
         public static SslStream Connect(string host, int port, bool noSslVerify = false)
         {
-            Console.WriteLine("[CertPin] Connecting to {0}:{1} with certificate {2}...",
-                host, port, noSslVerify ? "validation disabled" : "pinning");
+            Console.WriteLine("[SSL] Connecting to {0}:{1} (TLS, cert {2})...",
+                host, port, noSslVerify ? "validation disabled" : "pinning enabled");
 
             var client = new TcpClient(host, port);
             var sslStream = new SslStream(
@@ -103,17 +157,129 @@ namespace DemoPayload
             try
             {
                 sslStream.AuthenticateAsClient(host, null, SslProtocols.Tls12, checkCertificateRevocation: false);
-                Console.WriteLine("[CertPin] TLS handshake succeeded — certificate accepted");
+                Console.WriteLine("[SSL] TLS handshake succeeded — certificate accepted");
             }
             catch (AuthenticationException ex)
             {
-                Console.WriteLine("[CertPin] TLS handshake FAILED: {0}", ex.Message);
+                Console.WriteLine("[SSL] TLS handshake FAILED: {0}", ex.Message);
                 client.Close();
                 throw;
             }
 
             return sslStream;
         }
+
+        // ── Step 2: Send Beacon ──────────────────────────────────────
+
+        /// <summary>
+        /// Send a length-prefixed encrypted beacon over the TLS channel.
+        /// </summary>
+        public static void SendBeacon(SslStream ssl, byte[] encryptedBeacon)
+        {
+            Console.WriteLine("[SSL] Sending {0} encrypted bytes...", encryptedBeacon.Length);
+
+            byte[] lenPrefix = BitConverter.GetBytes(encryptedBeacon.Length);
+            ssl.Write(lenPrefix, 0, lenPrefix.Length);
+            ssl.Write(encryptedBeacon, 0, encryptedBeacon.Length);
+            ssl.Flush();
+
+            Console.WriteLine("[SSL] Beacon sent successfully");
+        }
+
+        // ── Step 3: Verify Server ACK ────────────────────────────────
+
+        /// <summary>
+        /// Read the server's ACK response, decrypt if encrypted, and verify
+        /// it echoes the original beacon. The expected format (after decryption
+        /// if applicable) is "ACK{&lt;original_beacon&gt;}".
+        /// This acts as server authentication — a valid encrypted ACK proves
+        /// the server holds the shared key and understood the protocol.
+        /// A plaintext ACK is accepted with a warning.
+        /// </summary>
+        public static bool VerifyServerAck(SslStream ssl, string originalBeacon)
+        {
+            Console.WriteLine("[SSL] Reading server ACK...");
+
+            // Read length-prefixed response
+            byte[] lenBuf = new byte[4];
+            int read = ssl.Read(lenBuf, 0, 4);
+            if (read < 4)
+            {
+                Console.WriteLine("[SSL] No ACK received (server closed connection)");
+                return false;
+            }
+
+            int respLen = BitConverter.ToInt32(lenBuf, 0);
+            if (respLen <= 0 || respLen > 65536)
+            {
+                Console.WriteLine("[SSL] Invalid ACK length: {0}", respLen);
+                return false;
+            }
+
+            byte[] respBuf = new byte[respLen];
+            int totalRead = 0;
+            while (totalRead < respLen)
+            {
+                int n = ssl.Read(respBuf, totalRead, respLen - totalRead);
+                if (n <= 0) break;
+                totalRead += n;
+            }
+
+            if (totalRead < respLen)
+            {
+                Console.WriteLine("[SSL] Incomplete ACK ({0}/{1} bytes)", totalRead, respLen);
+                return false;
+            }
+
+            Console.WriteLine("[SSL] Received ACK ({0} bytes)", totalRead);
+
+            // Determine whether the response is encrypted (AES-CBC produces
+            // ciphertext whose length is always a multiple of the block size)
+            string ack;
+            bool wasEncrypted;
+            if (totalRead % 16 == 0)
+            {
+                try
+                {
+                    ack = CryptoChannel.Decrypt(respBuf);
+                    wasEncrypted = true;
+                }
+                catch
+                {
+                    // Not valid ciphertext despite being block-aligned — treat as plaintext
+                    ack = Encoding.UTF8.GetString(respBuf, 0, totalRead);
+                    wasEncrypted = false;
+                }
+            }
+            else
+            {
+                ack = Encoding.UTF8.GetString(respBuf, 0, totalRead);
+                wasEncrypted = false;
+            }
+
+            if (!wasEncrypted)
+                Console.WriteLine("[SSL] WARNING — server ACK was not encrypted");
+
+            // Verify: ACK must wrap the beacon as ACK{<beacon>}
+            if (!ack.StartsWith(AckPrefix) || ack[ack.Length - 1] != AckSuffix)
+            {
+                Console.WriteLine("[SSL] REJECTED — response is not a valid ACK");
+                return false;
+            }
+
+            string echoedBeacon = ack.Substring(AckPrefix.Length, ack.Length - AckPrefix.Length - 1);
+            if (echoedBeacon != originalBeacon)
+            {
+                Console.WriteLine("[SSL] REJECTED — beacon mismatch");
+                return false;
+            }
+
+            Console.WriteLine("[SSL] VERIFIED — server echoed correct beacon{0}",
+                wasEncrypted ? " (encrypted)" : " (plaintext)");
+            return true;
+        }
+
+        // ── Certificate callbacks ────────────────────────────────────
 
         /// <summary>
         /// Custom certificate validation callback.
@@ -128,20 +294,20 @@ namespace DemoPayload
         {
             if (certificate == null)
             {
-                Console.WriteLine("[CertPin] No certificate presented — rejecting");
+                Console.WriteLine("[SSL] No certificate presented — rejecting");
                 return false;
             }
 
             string thumbprint = certificate.GetCertHashString();
-            Console.WriteLine("[CertPin] Server certificate thumbprint: {0}", thumbprint);
+            Console.WriteLine("[SSL] Server certificate thumbprint: {0}", thumbprint);
 
             if (!string.Equals(thumbprint, PinnedThumbprint, StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine("[CertPin] Thumbprint does NOT match pinned value — rejecting");
+                Console.WriteLine("[SSL] Thumbprint does NOT match pinned value — rejecting");
                 return false;
             }
 
-            Console.WriteLine("[CertPin] Thumbprint matches pinned value — accepting");
+            Console.WriteLine("[SSL] Thumbprint matches pinned value — accepting");
             return true;
         }
 
@@ -155,57 +321,8 @@ namespace DemoPayload
             X509Chain chain,
             SslPolicyErrors sslPolicyErrors)
         {
-            Console.WriteLine("[CertPin] Certificate validation SKIPPED (--no-ssl) — accepting");
+            Console.WriteLine("[SSL] Certificate validation SKIPPED (--no-ssl) — accepting");
             return true;
-        }
-
-        /// <summary>
-        /// Connect, send a length-prefixed encrypted message, then close.
-        /// </summary>
-        public static void SendMessage(string host, int port, byte[] encryptedMessage, bool noSslVerify = false)
-        {
-            try
-            {
-                using (var ssl = Connect(host, port, noSslVerify))
-                {
-                    Console.WriteLine("[CertPin] Sending {0} encrypted bytes over pinned TLS channel",
-                        encryptedMessage.Length);
-
-                    // Write length-prefixed message
-                    byte[] lenPrefix = BitConverter.GetBytes(encryptedMessage.Length);
-                    ssl.Write(lenPrefix, 0, lenPrefix.Length);
-                    ssl.Write(encryptedMessage, 0, encryptedMessage.Length);
-                    ssl.Flush();
-
-                    Console.WriteLine("[CertPin] Message sent successfully");
-
-                    // Read length-prefixed ACK response
-                    byte[] respLenBuf = new byte[4];
-                    int read = ssl.Read(respLenBuf, 0, 4);
-                    if (read == 4)
-                    {
-                        int respLen = BitConverter.ToInt32(respLenBuf, 0);
-                        if (respLen > 0 && respLen < 65536)
-                        {
-                            byte[] respBuf = new byte[respLen];
-                            int totalRead = 0;
-                            while (totalRead < respLen)
-                            {
-                                int n = ssl.Read(respBuf, totalRead, respLen - totalRead);
-                                if (n <= 0) break;
-                                totalRead += n;
-                            }
-                            string response = System.Text.Encoding.UTF8.GetString(respBuf, 0, totalRead);
-                            Console.WriteLine("[CertPin] Server response: {0}", response);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("[CertPin] Connection failed (expected without ssl_unpin): {0}",
-                    ex.GetBaseException().Message);
-            }
         }
     }
 

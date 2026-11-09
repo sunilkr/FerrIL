@@ -3,7 +3,7 @@
     "patches": [
         {
             "name": "ValidateServerCertificate",
-            "class": "DemoPayload.CertPinning",
+            "class": "DemoPayload.ServerChannel",
             "new_bytes": ["0x17", "0x2a"]
         }
     ],

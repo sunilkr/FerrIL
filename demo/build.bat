@@ -1,8 +1,9 @@
 @echo off
 REM ═══════════════════════════════════════════════════════════════════
 REM  FerrIL Demo — Build Script
-REM  Compiles DemoPayload.dll and DemoTarget.exe using csc.exe from
-REM  .NET Framework 4.x installed on the system.
+REM  Compiles DemoPayload.dll, encrypts it into payload.bin, then
+REM  builds DemoTarget.exe. Only the encrypted payload ships in the
+REM  output directory — the raw DLL is removed after encryption.
 REM ═══════════════════════════════════════════════════════════════════
 
 setlocal enabledelayedexpansion
@@ -30,7 +31,7 @@ echo.
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
 REM ── Step 1: Build DemoPayload.dll (cert pinning + crypto + Stage2) ──
-echo [1/2] Building DemoPayload.dll...
+echo [1/4] Building DemoPayload.dll...
 "%CSC%" /nologo /target:library /optimize ^
     /out:"%OUTDIR%\DemoPayload.dll" ^
     "%~dp0DemoPayload\Stage2.cs"
@@ -41,8 +42,34 @@ if errorlevel 1 (
 )
 echo      OK: %OUTDIR%\DemoPayload.dll
 
-REM ── Step 2: Build DemoTarget.exe (loader, x86) ─────────────────────
-echo [2/2] Building DemoTarget.exe (x86)...
+REM ── Step 2: Build EncryptPayload.exe (build-time helper) ───────────
+echo [2/4] Building EncryptPayload.exe...
+"%CSC%" /nologo /target:exe /optimize ^
+    /out:"%OUTDIR%\EncryptPayload.exe" ^
+    "%~dp0tools\EncryptPayload.cs"
+
+if errorlevel 1 (
+    echo FAILED: EncryptPayload.exe
+    exit /b 1
+)
+echo      OK: %OUTDIR%\EncryptPayload.exe
+
+REM ── Step 3: Encrypt DemoPayload.dll → payload.bin ──────────────────
+echo [3/4] Encrypting payload...
+"%OUTDIR%\EncryptPayload.exe" "%OUTDIR%\DemoPayload.dll" "%OUTDIR%\payload.bin"
+
+if errorlevel 1 (
+    echo FAILED: payload encryption
+    exit /b 1
+)
+
+REM Remove raw DLL and encrypt tool — only payload.bin remains
+del "%OUTDIR%\DemoPayload.dll"
+del "%OUTDIR%\EncryptPayload.exe"
+echo      OK: %OUTDIR%\payload.bin (raw DLL removed)
+
+REM ── Step 4: Build DemoTarget.exe (loader, x86) ─────────────────────
+echo [4/4] Building DemoTarget.exe (x86)...
 "%CSC%" /nologo /target:exe /optimize /platform:x86 ^
     /out:"%OUTDIR%\DemoTarget.exe" ^
     "%~dp0DemoTarget\Program.cs" ^
@@ -57,5 +84,8 @@ echo      OK: %OUTDIR%\DemoTarget.exe
 
 echo.
 echo Build successful!
+echo Output:
+echo   %OUTDIR%\DemoTarget.exe   (loader)
+echo   %OUTDIR%\payload.bin      (encrypted payload)
 
 endlocal
